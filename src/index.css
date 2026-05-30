@@ -1,0 +1,15 @@
+/* src/index.css */
+@import "tailwindcss";
+
+/* v4 CSS-first theme tokens */
+@theme {
+  --color-brand: #6366f1;
+  --color-brand-dark: #4f46e5;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+html { -webkit-text-size-adjust: 100%; }
+body { @apply bg-slate-950 text-slate-100 antialiased; }
+
+/* respect iOS safe areas for the bottom nav */
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom); }

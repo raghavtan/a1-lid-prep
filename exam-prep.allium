@@ -1,0 +1,619 @@
+-- allium: 3
+-- exam-prep.allium
+--
+-- Scope: A1 + LiD exam preparation app (browser-based, no backend)
+-- Includes: LiD question study and mock testing, A1 vocabulary flashcards,
+--           grammar drills (articles, sentence order), A1 self-quiz,
+--           readiness scoring, settings (exam date, import/export, reset)
+-- Excludes:
+--   - Authentication / accounts (single-learner, device-local design)
+--   - Persistence mechanism (localStorage is implementation; spec is storage-agnostic)
+
+config {
+    lid_exam_size: Integer = 33
+    lid_pass_mark: Integer = 17
+    lid_exam_duration: Duration = 60.minutes
+    default_exam_offset: Duration = 30.days
+    lid_coverage_weight: Decimal = 0.4
+    lid_mock_weight: Decimal = 0.6
+
+    -- A1 readiness reflects the structured course: module completion,
+    -- spaced-repetition mastery, and best module-test performance.
+    a1_module_weight: Decimal = 0.4
+    a1_srs_weight: Decimal = 0.3
+    a1_test_weight: Decimal = 0.3
+
+    -- A module is complete when every lesson is done and the best module-test
+    -- score is at least this ratio of correct answers.
+    module_pass_ratio: Decimal = 0.6
+
+    -- Leitner spaced repetition: 5 boxes; an item counts as mastered at box 4+.
+    -- Promotion pushes the next review further out (1, 2, 4, 8, 16 days).
+    srs_max_box: Integer = 5
+    srs_mastered_box: Integer = 4
+    srs_interval_1: Duration = 1.days
+    srs_interval_2: Duration = 2.days
+    srs_interval_3: Duration = 4.days
+    srs_interval_4: Duration = 8.days
+    srs_interval_5: Duration = 16.days
+}
+
+-- Static content shipped with the app; not owned by this system.
+external entity LidQuestion {
+    id: String
+    question: String
+    options: List<String>
+    answer: Integer          -- index into options[]
+    category: general | berlin
+    explanation: String?     -- per-question background shipped with the bank; not yet surfaced in any UI
+}
+
+external entity FlashCard {
+    id: String
+    de: String
+    en: String
+    category: String         -- e.g. Nouns, Verbs, Greetings, Numbers
+}
+
+external entity QuizQuestion {
+    id: String
+    question: String
+    options: List<String>
+    answer: Integer
+}
+
+-- Structured A1 course content shipped with the app. A module is an ordered
+-- thematic unit of lessons plus a self-test plus a pool of reviewable items.
+external entity CourseModule {
+    id: String
+    order: Integer
+    title: String
+    lessons: List<Lesson>
+    review_items: List<ReviewItem>
+}
+
+external entity Lesson {
+    id: String
+    title: String
+    module: CourseModule
+    kind: vocab | grammar | reading | listening | dialog | writing | speaking
+}
+
+-- A single spaced-repetition unit (typically a vocab pair) drawn from a module.
+external entity ReviewItem {
+    id: String
+    de: String
+    en: String
+}
+
+-- The learner's single progress record. Persisted across sessions.
+entity LearnerProgress {
+    exam_date: Timestamp
+    created_at: Timestamp
+
+    studied_questions: Set<LidQuestion>
+    mock_results: MockResult with progress = this
+
+    known_cards: Set<FlashCard>
+    grammar_attempts: Integer
+    grammar_correct: Integer
+    quiz_results: QuizResult with progress = this
+
+    module_progress: ModuleProgress with progress = this
+    review_states: ReviewState with progress = this
+
+    -- LiD readiness: 0-100, weighted from coverage and best mock performance
+    lid_coverage: studied_questions.count / LidQuestion.all.count
+    lid_best_mock: mock_results.max(r => r.score / r.total) ?? 0
+    lid_readiness: (config.lid_coverage_weight * lid_coverage + config.lid_mock_weight * lid_best_mock) * 100
+
+    -- Legacy free-practice signals. Retained for the practice area but no
+    -- longer part of the readiness score (the course supersedes them).
+    card_coverage: known_cards.count / FlashCard.all.count
+    grammar_accuracy: (grammar_correct / grammar_attempts) ?? 0
+    a1_best_quiz: quiz_results.max(r => r.score / r.total) ?? 0
+
+    -- A1 readiness: 0-100, weighted from course module completion,
+    -- spaced-repetition mastery, and best module-test performance.
+    completed_modules: module_progress where completed
+    a1_module_score: completed_modules.count / CourseModule.all.count
+    a1_srs_mastery: (review_states where mastered).count / ReviewItem.all.count
+    a1_best_test: module_progress.max(m => m.test_best) ?? 0
+    a1_readiness: (config.a1_module_weight * a1_module_score + config.a1_srs_weight * a1_srs_mastery + config.a1_test_weight * a1_best_test) * 100
+
+    days_left: exam_date - now
+}
+
+entity MockResult {
+    progress: LearnerProgress
+    date: Timestamp
+    score: Integer
+    total: Integer
+    pass_mark: Integer
+    passed: score >= pass_mark
+}
+
+entity QuizResult {
+    progress: LearnerProgress
+    date: Timestamp
+    score: Integer
+    total: Integer
+}
+
+-- The learner's progress through one course module: which lessons are done
+-- and the best module-test score so far.
+entity ModuleProgress {
+    progress: LearnerProgress
+    module: CourseModule
+    lessons_done: Set<Lesson>
+    test_best: Decimal              -- best score/total ratio; 0 before any attempt
+    completed_at: Timestamp?
+
+    all_lessons_done: lessons_done.count = module.lessons.count
+    test_passed: test_best >= config.module_pass_ratio
+    completed: all_lessons_done and test_passed
+}
+
+-- Per-item spaced-repetition state (Leitner). box drives the review schedule.
+entity ReviewState {
+    progress: LearnerProgress
+    item: ReviewItem
+    box: Integer                    -- Leitner box, 1..config.srs_max_box
+    due: Timestamp
+    seen: Integer
+    correct: Integer
+
+    mastered: box >= config.srs_mastered_box
+    is_due: due <= now
+
+    -- Interval applied after the next grading, keyed off the resulting box.
+    next_interval:
+        if box <= 1: config.srs_interval_1
+        else if box = 2: config.srs_interval_2
+        else if box = 3: config.srs_interval_3
+        else if box = 4: config.srs_interval_4
+        else: config.srs_interval_5
+}
+
+-- Transient exam session. Not persisted; a MockResult is appended to
+-- LearnerProgress when the session ends.
+entity MockSession {
+    questions: List<LidQuestion>
+    size: Integer
+    pass_mark: Integer
+    status: running | done
+    expires_at: Timestamp
+
+    selections: Selection with session = this
+
+    score: (selections where correct).count
+    time_remaining: expires_at - now
+    timed_out: status = running and time_remaining <= 0
+}
+
+entity Selection {
+    session: MockSession
+    question: LidQuestion
+    option: Integer          -- index into question.options[]
+    correct: option = question.answer
+}
+
+-- ── Rules ────────────────────────────────────────────────────────────────────
+
+given {
+    progress: LearnerProgress
+}
+
+-- Revealing the answer marks the question as studied. Idempotent.
+rule RevealLidAnswer {
+    when: LearnerRevealsAnswer(question)
+    ensures: progress.studied_questions = progress.studied_questions + {question}
+}
+
+rule StartMockExam {
+    when: LearnerStartsMockExam()
+    let sample_size = min(config.lid_exam_size, LidQuestion.all.count)
+    ensures: MockSession.created(
+        questions: LidQuestion.all,
+        size: sample_size,
+        pass_mark: config.lid_pass_mark,
+        status: running,
+        expires_at: now + config.lid_exam_duration,
+    )
+    @guidance
+        -- questions is a random sample of sample_size questions from LidQuestion.all
+        -- (no repetition). size reflects the actual sample count. pass_mark =
+        -- ceil(size * config.lid_pass_mark / config.lid_exam_size), which equals
+        -- config.lid_pass_mark exactly when the full bank is available.
+        --
+        -- The shipped bank now holds far more than config.lid_exam_size questions,
+        -- so in practice sample_size is always config.lid_exam_size (33) and
+        -- pass_mark is always config.lid_pass_mark (17). The scaling above is a
+        -- retained fallback for a reduced bank (fewer than lid_exam_size questions).
+}
+
+-- Selecting an answer replaces any previous selection for that question in
+-- this session.
+rule SelectMockAnswer {
+    when: LearnerSelectsAnswer(session, target_question, option)
+    requires: session.status = running
+    requires: target_question in session.questions
+    let existing = session.selections where question = target_question
+    ensures:
+        for s in existing: not exists s
+    ensures: Selection.created(session: session, question: target_question, option: option)
+}
+
+rule SubmitMockExam {
+    when: LearnerSubmitsMock(session)
+    requires: session.status = running
+    ensures: session.status = done
+    ensures: MockResult.created(
+        progress: progress,
+        date: now,
+        score: session.score,
+        total: session.size,
+        pass_mark: session.pass_mark,
+    )
+}
+
+-- If 60 minutes elapse the exam auto-submits with whatever has been answered.
+rule MockExamTimesOut {
+    when: session: MockSession.expires_at <= now
+    requires: session.status = running
+    ensures: session.status = done
+    ensures: MockResult.created(
+        progress: progress,
+        date: now,
+        score: session.score,
+        total: session.size,
+        pass_mark: session.pass_mark,
+    )
+}
+
+-- Bidirectional: marking a known card as unknown is supported (correction).
+rule ToggleCardKnown {
+    when: LearnerTogglesCard(card)
+    ensures:
+        if card in progress.known_cards:
+            progress.known_cards = progress.known_cards - {card}
+        else:
+            progress.known_cards = progress.known_cards + {card}
+}
+
+-- Grammar accuracy is cumulative across all drill types (articles and
+-- sentence order are unified in a single running tally).
+rule RecordGrammarAnswer {
+    when: LearnerAnswersGrammar(correct)
+    ensures: progress.grammar_attempts = progress.grammar_attempts + 1
+    ensures:
+        if correct:
+            progress.grammar_correct = progress.grammar_correct + 1
+}
+
+rule CompleteA1Quiz {
+    when: LearnerCompletesQuiz(score, total)
+    ensures: QuizResult.created(
+        progress: progress,
+        date: now,
+        score: score,
+        total: total,
+    )
+}
+
+-- Completing a lesson records it against its module's progress. Idempotent;
+-- creates the ModuleProgress on first interaction with the module.
+rule CompleteLesson {
+    when: LearnerCompletesLesson(lesson)
+    let existing = progress.module_progress where module = lesson.module
+    ensures:
+        if existing.count = 0:
+            ModuleProgress.created(
+                progress: progress,
+                module: lesson.module,
+                lessons_done: {lesson},
+                test_best: 0,
+            )
+        else:
+            for m in existing:
+                m.lessons_done = m.lessons_done + {lesson}
+}
+
+-- A module test keeps the best ratio of correct answers seen so far.
+rule SubmitModuleTest {
+    when: LearnerSubmitsModuleTest(target_module, score, total)
+    let existing = progress.module_progress where module = target_module
+    let ratio = score / total
+    ensures:
+        if existing.count = 0:
+            ModuleProgress.created(
+                progress: progress,
+                module: target_module,
+                lessons_done: {},
+                test_best: ratio,
+            )
+        else:
+            for m in existing:
+                if ratio > m.test_best:
+                    m.test_best = ratio
+}
+
+-- Stamp the completion time the moment a module first becomes complete.
+rule ModuleCompleted {
+    when: mp: ModuleProgress.completed becomes true
+    requires: mp.completed_at = null
+    ensures: mp.completed_at = now
+}
+
+-- Leitner review grading. A correct answer promotes the item (capped at the
+-- top box); a wrong answer drops it back to box 1. Either way the next due
+-- date is pushed out by the resulting box's interval.
+rule GradeReviewItem {
+    when: LearnerReviewsItem(target_item, correct)
+    let existing = progress.review_states where item = target_item
+    ensures:
+        if existing.count = 0:
+            ReviewState.created(
+                progress: progress,
+                item: target_item,
+                box: if correct: 2 else: 1,
+                due: now + (if correct: config.srs_interval_2 else: config.srs_interval_1),
+                seen: 1,
+                correct: if correct: 1 else: 0,
+            )
+        else:
+            for r in existing:
+                r.seen = r.seen + 1
+                r.correct = r.correct + (if correct: 1 else: 0)
+                r.box = if correct: min(config.srs_max_box, r.box + 1) else: 1
+                r.due = now + r.next_interval
+    @guidance
+        -- r.next_interval is evaluated on the resulting box (post-update),
+        -- so a just-promoted item is scheduled by its new, longer interval.
+}
+
+rule SetExamDate {
+    when: LearnerSetsExamDate(date)
+    ensures: progress.exam_date = date
+}
+
+-- Import merges incoming data over defaults: present fields replace current
+-- values; history lists are replaced wholesale.
+rule ImportProgress {
+    when: LearnerImportsProgress(data)
+    ensures: progress.exam_date = data.exam_date
+    ensures: progress.studied_questions = data.studied_questions
+    ensures: progress.known_cards = data.known_cards
+    ensures: progress.grammar_attempts = data.grammar_attempts
+    ensures: progress.grammar_correct = data.grammar_correct
+    ensures:
+        for r in progress.mock_results: not exists r
+    ensures:
+        for r in data.mock_results:
+            MockResult.created(progress: progress, date: r.date, score: r.score, total: r.total, pass_mark: r.pass_mark)
+    ensures:
+        for r in progress.quiz_results: not exists r
+    ensures:
+        for r in data.quiz_results:
+            QuizResult.created(progress: progress, date: r.date, score: r.score, total: r.total)
+    ensures:
+        for m in progress.module_progress: not exists m
+    ensures:
+        for m in data.module_progress:
+            ModuleProgress.created(progress: progress, module: m.module, lessons_done: m.lessons_done, test_best: m.test_best)
+    ensures:
+        for r in progress.review_states: not exists r
+    ensures:
+        for r in data.review_states:
+            ReviewState.created(progress: progress, item: r.item, box: r.box, due: r.due, seen: r.seen, correct: r.correct)
+}
+
+rule ResetProgress {
+    when: LearnerResetsProgress()
+    ensures: progress.exam_date = now + config.default_exam_offset
+    ensures: progress.studied_questions = {}
+    ensures: progress.known_cards = {}
+    ensures: progress.grammar_attempts = 0
+    ensures: progress.grammar_correct = 0
+    ensures:
+        for r in progress.mock_results: not exists r
+    ensures:
+        for r in progress.quiz_results: not exists r
+    ensures:
+        for m in progress.module_progress: not exists m
+    ensures:
+        for r in progress.review_states: not exists r
+}
+
+-- ── Surfaces ─────────────────────────────────────────────────────────────────
+
+surface Dashboard {
+    facing visitor: LearnerProgress
+
+    exposes:
+        visitor.days_left
+        visitor.exam_date
+        visitor.lid_readiness
+        visitor.a1_readiness
+        visitor.studied_questions.count
+        visitor.known_cards.count
+        visitor.mock_results
+
+    related:
+        LidStudy
+        LidMock
+        A1Course
+        Settings
+}
+
+surface LidStudy {
+    facing visitor: LearnerProgress
+
+    exposes:
+        visitor.studied_questions.count
+        for q in LidQuestion.all:
+            q.id
+            q.question
+            q.options
+            q.answer
+            q.category
+            q.id in visitor.studied_questions
+
+    provides:
+        LearnerRevealsAnswer(question)
+}
+
+surface LidMock {
+    facing visitor: LearnerProgress
+
+    context session: MockSession
+
+    exposes:
+        visitor.mock_results
+        session.status
+        session.size
+        session.pass_mark
+        session.time_remaining when session.status = running
+        for q in session.questions:
+            q.id
+            q.question
+            q.options
+            session.selections where question = q
+        session.score when session.status = done
+        for q in session.questions:
+            q.answer when session.status = done
+
+    provides:
+        LearnerStartsMockExam()
+            when session.status = done
+        LearnerSelectsAnswer(session, question, option)
+            when session.status = running
+        LearnerSubmitsMock(session)
+            when session.status = running
+
+    timeout:
+        MockExamTimesOut
+}
+
+-- A1 course home: the ordered module list with per-module progress and the
+-- count of spaced-repetition items due for review.
+surface A1Course {
+    facing visitor: LearnerProgress
+
+    exposes:
+        visitor.a1_readiness
+        visitor.completed_modules.count
+        for m in CourseModule.all:
+            m.id
+            m.order
+            m.title
+            m.lessons.count
+            visitor.module_progress where module = m
+        (visitor.review_states where is_due).count
+
+    related:
+        A1ModuleView
+        A1Review
+        A1Study
+}
+
+-- One module: its lessons and the learner's progress within it.
+surface A1ModuleView {
+    facing visitor: LearnerProgress
+
+    context module: CourseModule
+
+    exposes:
+        module.id
+        module.title
+        for lesson in module.lessons:
+            lesson.id
+            lesson.title
+            lesson.kind
+        visitor.module_progress where module = module
+
+    provides:
+        LearnerSubmitsModuleTest(module, score, total)
+
+    related:
+        A1Lesson
+}
+
+-- A single lesson. Completing it records progress against its module.
+surface A1Lesson {
+    facing visitor: LearnerProgress
+
+    context lesson: Lesson
+
+    exposes:
+        lesson.id
+        lesson.title
+        lesson.kind
+        visitor.module_progress where module = lesson.module
+
+    provides:
+        LearnerCompletesLesson(lesson)
+}
+
+-- Spaced-repetition review: work through the items that are due now.
+surface A1Review {
+    facing visitor: LearnerProgress
+
+    exposes:
+        (visitor.review_states where is_due).count
+        for it in ReviewItem.all:
+            it.id
+            it.de
+            it.en
+            visitor.review_states where item = it
+
+    provides:
+        LearnerReviewsItem(item, correct)
+}
+
+-- Legacy free-practice area: flashcards, grammar drills, and the self-quiz.
+-- Retained alongside the course; no longer drives the readiness score.
+surface A1Study {
+    facing visitor: LearnerProgress
+
+    exposes:
+        for card in FlashCard.all:
+            card.id
+            card.de
+            card.en
+            card.category
+            card.id in visitor.known_cards
+        visitor.grammar_attempts
+        visitor.grammar_correct
+        for q in QuizQuestion.all:
+            q.id
+            q.question
+            q.options
+        for result in visitor.quiz_results:
+            result.score
+            result.total
+            result.date
+
+    provides:
+        LearnerTogglesCard(card)
+        LearnerAnswersGrammar(correct)
+        LearnerCompletesQuiz(score, total)
+}
+
+surface Settings {
+    facing visitor: LearnerProgress
+
+    exposes:
+        visitor.exam_date
+
+    provides:
+        LearnerSetsExamDate(date)
+        LearnerImportsProgress(data)
+        LearnerResetsProgress()
+}
+
+-- Resolved: the cumulative grammar tally is retained only for the legacy
+-- free-practice area (A1Study) and no longer feeds readiness. Grammar mastery
+-- is now assessed through per-module tests (SubmitModuleTest) and reinforced by
+-- spaced repetition (GradeReviewItem), so the per-session-vs-cumulative
+-- question no longer affects the score.
