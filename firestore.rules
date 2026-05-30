@@ -1,0 +1,17 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Each user can only read/write their own progress document.
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Allowlist is readable by any signed-in user (needed for email check on login),
+    // but only writable via the Firebase console / Admin SDK.
+    match /config/allowedEmails {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+  }
+}

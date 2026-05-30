@@ -1,6 +1,6 @@
 // src/pages/LidMock.jsx
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { Timer, Play, RotateCcw, CheckCircle2, XCircle } from 'lucide-react';
+import { Timer, Play, RotateCcw, CheckCircle2, XCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { lidQuestions } from '../data/lidQuestions.js';
 import { useProgress } from '../hooks/useProgress.jsx';
 
@@ -137,21 +137,41 @@ export default function LidMock() {
             <div className="space-y-2">
                 {exam.questions.map((q, i) => {
                     const ok = answers[q.id] === q.answer;
-                    return (
-                        <div key={q.id} className="rounded-xl border border-slate-800 bg-slate-900/50 p-3 text-sm">
-                            <div className="flex items-start gap-2">
-                                {ok ? <CheckCircle2 size={16} className="text-emerald-400 mt-0.5 shrink-0" /> : <XCircle size={16} className="text-red-400 mt-0.5 shrink-0" />}
-                                <span className="font-medium">{i + 1}. {q.question}</span>
-                            </div>
-                            {!ok && <div className="ml-6 mt-1 text-emerald-300">✓ {q.options[q.answer]}</div>}
-                        </div>
-                    );
+                    return <ReviewItem key={q.id} q={q} num={i + 1} ok={ok} picked={answers[q.id]} />;
                 })}
             </div>
 
             <button onClick={start} className="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3.5 font-semibold hover:bg-indigo-500">
                 <RotateCcw size={18} /> Try again
             </button>
+        </div>
+    );
+}
+
+function ReviewItem({ q, num, ok, picked }) {
+    const [open, setOpen] = useState(false);
+    return (
+        <div className="rounded-xl border border-slate-800 bg-slate-900/50 text-sm">
+            <button onClick={() => setOpen((v) => !v)} className="w-full flex items-start gap-2 p-3 text-left">
+                {ok
+                    ? <CheckCircle2 size={16} className="text-emerald-400 mt-0.5 shrink-0" />
+                    : <XCircle size={16} className="text-red-400 mt-0.5 shrink-0" />}
+                <span className="flex-1 font-medium">{num}. {q.question}</span>
+                {!ok && (open ? <ChevronUp size={15} className="shrink-0 text-slate-500" /> : <ChevronDown size={15} className="shrink-0 text-slate-500" />)}
+            </button>
+            {!ok && (
+                <>
+                    <div className="px-3 pb-2 ml-6 text-emerald-300">✓ {q.options[q.answer]}</div>
+                    {picked !== undefined && picked !== null && (
+                        <div className="px-3 pb-2 ml-6 text-red-400">✗ {q.options[picked]}</div>
+                    )}
+                    {open && q.explanation && (
+                        <div className="px-3 pb-3 ml-6 text-slate-400 leading-relaxed border-t border-slate-800 pt-2 mt-1">
+                            {q.explanation}
+                        </div>
+                    )}
+                </>
+            )}
         </div>
     );
 }

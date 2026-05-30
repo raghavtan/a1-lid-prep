@@ -1,6 +1,7 @@
 // src/components/Layout.jsx
 import { NavLink, Outlet } from 'react-router-dom';
-import { LayoutDashboard, BookOpen, GraduationCap, ClipboardCheck, BarChart3, Settings } from 'lucide-react';
+import { LayoutDashboard, BookOpen, GraduationCap, ClipboardCheck, BarChart3, Settings, LogOut } from 'lucide-react';
+import { useAuth } from '../hooks/useAuth.jsx';
 
 const nav = [
     { to: '/', label: 'Home', icon: LayoutDashboard, end: true },
@@ -12,6 +13,8 @@ const nav = [
 ];
 
 export default function Layout() {
+    const { user, signOut } = useAuth();
+
     return (
         <div className="min-h-screen flex flex-col md:flex-row">
             {/* Sidebar (desktop) */}
@@ -19,6 +22,7 @@ export default function Layout() {
                 <div className="px-3 py-4 text-lg font-bold tracking-tight">
                     🇩🇪 <span className="text-indigo-400">A1·LiD</span> Prep
                 </div>
+
                 {nav.map(({ to, label, icon: Icon, end }) => (
                     <NavLink key={to} to={to} end={end}
                              className={({ isActive }) =>
@@ -27,6 +31,28 @@ export default function Layout() {
                         <Icon size={18} /> {label}
                     </NavLink>
                 ))}
+
+                {/* User info + sign out at the bottom */}
+                <div className="mt-auto pt-4 border-t border-slate-800">
+                    {user && (
+                        <div className="flex items-center gap-2 px-3 py-2">
+                            {user.photoURL
+                                ? <img src={user.photoURL} alt="" className="w-7 h-7 rounded-full" referrerPolicy="no-referrer" />
+                                : <div className="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold text-white">
+                                    {user.displayName?.[0] ?? user.email?.[0] ?? '?'}
+                                  </div>
+                            }
+                            <div className="flex-1 min-w-0">
+                                <p className="text-xs font-medium text-slate-200 truncate">{user.displayName ?? 'User'}</p>
+                                <p className="text-[10px] text-slate-500 truncate">{user.email}</p>
+                            </div>
+                            <button onClick={signOut} title="Sign out"
+                                    className="text-slate-500 hover:text-red-400 transition-colors">
+                                <LogOut size={15} />
+                            </button>
+                        </div>
+                    )}
+                </div>
             </aside>
 
             {/* Main */}
